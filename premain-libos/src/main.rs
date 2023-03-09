@@ -1,6 +1,10 @@
-use rcgen::{Certificate, CertificateParams};
+use crate::coordinator::marble_client::MarbleClient;
+use rcgen::CertificateParams;
 use std::env;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use tonic::transport::ClientTlsConfig;
+use tonic::transport::{Channel, Identity};
+use url::Url;
 
 enum LibOS {
     Gramine,
@@ -8,13 +12,18 @@ enum LibOS {
     Unknown,
 }
 
-fn main() {
+pub mod coordinator {
+    tonic::include_proto!("rpc");
+}
+
+#[tokio::main]
+async fn main() {
     println!("[PreMain] Trying to detect libOS");
     let libos = detect_lib_os();
     match libos {
         LibOS::Gramine => {
             println!("[PreMain] Detected Gramine");
-            premain_ex();
+            premain_ex().await.unwrap();
         }
         LibOS::Occlum => {
             println!("[PreMain] Detected Occlum");
@@ -22,7 +31,7 @@ fn main() {
         }
         LibOS::Unknown => {
             println!("[PreMain] Unknown libOS");
-            premain_ex();
+            premain_ex().await.unwrap();
         }
     }
 }
@@ -52,10 +61,11 @@ fn detect_lib_os() -> LibOS {
     return LibOS::Unknown;
 }
 
-fn premain_ex() {
+async fn premain_ex() -> Result<(), Box<dyn std::error::Error>> {
     println!("[PreMain] Running premain_ex");
     println!("[PreMain] Starting PreMain");
-    let coordinator_addr = get_env_with_default("EDG_MARBLE_COORDINATOR_ADDR", "localhost:2001");
+    let coordinator_addr =
+        get_env_with_default("EDG_MARBLE_COORDINATOR_ADDR", "https://localhost:2001");
     println!("[PreMain] Coordinator address: {}", coordinator_addr);
     let marble_type = env::var("EDG_MARBLE_TYPE").expect("EDG_MARBLE_TYPE not set");
     println!("[PreMain] Marble type: {}", marble_type);
@@ -65,8 +75,26 @@ fn premain_ex() {
     println!("[PreMain] UUID file: {}", uuid_file);
 
     let cert = generate_certificate(&marble_dns_names_string);
-    println!("{}", cert.serialize_pem().unwrap());
-    println!("{}", cert.serialize_private_key_pem());
+    let cert_pem = cert.serialize_pem().unwrap();
+    let key_pem = cert.serialize_private_key_pem();
+    println!("{}", cert_pem);
+
+    println!("{}", coordinator_addr.to_string());
+    let channel = Channel::from_shared(coordinator_addr.to_string())?
+        .tls_config(
+            ClientTlsConfig::new()
+                .identity(Identity::from_pem(&cert_pem, &key_pem))
+                .domain_name(Url::parse(&coordinator_addr)?.host_str().unwrap()),
+        )?
+        .timeout(tokio::time::Duration::from_secs(5))
+        .rate_limit(5, tokio::time::Duration::from_secs(1))
+        .concurrency_limit(256)
+        .connect()
+        .await?;
+
+    let client = MarbleClient::new(channel);
+
+    return Ok(());
 }
 
 fn get_env_with_default(name: &str, default: &str) -> String {
@@ -76,7 +104,7 @@ fn get_env_with_default(name: &str, default: &str) -> String {
     };
 }
 
-fn generate_certificate(marble_dns_names_string: &str) -> Certificate {
+fn generate_certificate(marble_dns_names_string: &str) -> rcgen::Certificate {
     println!("[PreMain] Generating certificate");
     let mut params = CertificateParams::default();
 
