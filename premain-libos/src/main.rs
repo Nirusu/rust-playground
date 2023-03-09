@@ -14,7 +14,7 @@ fn main() {
     match libos {
         LibOS::Gramine => {
             println!("[PreMain] Detected Gramine");
-            todo!("Gramine premain not implemented yet")
+            premain_ex();
         }
         LibOS::Occlum => {
             println!("[PreMain] Detected Occlum");
